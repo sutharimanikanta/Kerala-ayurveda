@@ -1,0 +1,22 @@
+# -----------------------------
+# Core RAG Dependencies
+# -----------------------------
+chromadb==0.5.5
+sentence-transformers==2.7.0
+rank-bm25==0.2.2
+groq==0.8.0
+
+# -----------------------------
+# ONNX-Based Inference (Torch-free)
+# -----------------------------
+onnx==1.20.0
+onnxruntime==1.20.0
+ml-dtypes==0.5.4
+
+# -----------------------------
+# Utilities
+# -----------------------------
+numpy>=1.23
+regex
+pydantic<2
+tqdm
