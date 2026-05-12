@@ -1,22 +1,39 @@
-# -----------------------------
-# Core RAG Dependencies
-# -----------------------------
-chromadb==0.5.5
-sentence-transformers==2.7.0
+
+
+# Nalpamaradi Keram Agentic RAG System
+# Python Version: 3.10+
+
+# Core dependencies
+streamlit==1.32.0
+python-dotenv==1.0.1
+
+# RAG Pipeline
+chromadb==0.4.22
+sentence-transformers==2.5.1
 rank-bm25==0.2.2
-groq==0.8.0
 
-# -----------------------------
-# ONNX-Based Inference (Torch-free)
-# -----------------------------
-onnx==1.20.0
-onnxruntime==1.20.0
-ml-dtypes==0.5.4
+# PDF Processing
+PyPDF2==3.0.1
+pdfplumber==0.10.4
+pytesseract==0.3.10
+Pillow==10.2.0
+pdf2image==1.17.0
 
-# -----------------------------
+# LLM API
+groq==0.4.2
+
+# NLP and ML
+numpy==1.26.4
+pandas==2.2.1
+scikit-learn==1.4.1.post1
+
 # Utilities
-# -----------------------------
-numpy>=1.23
-regex
-pydantic<2
-tqdm
+tqdm==4.66.2
+python-dateutil==2.9.0
+langdetect==1.0.9
+
+# Optional but recommended
+torch==2.2.1
+transformers==4.38.2
+
+

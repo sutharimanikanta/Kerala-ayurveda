@@ -1,533 +1,601 @@
-import logging
-import re
-import csv
-from pathlib import Path
-from typing import List, Dict, Any, Optional
-import warnings
+# # # D:\Download1\kerala_ayurveda_content_pack_v1\app.py
+"""
+Nalpamaradi Keram Agentic Content Generation System
+Main Streamlit Application with Persistent Corpus Support
+"""
 
-import chromadb
-from rank_bm25 import BM25Okapi
-from groq import Groq
-from sklearn.feature_extraction.text import TfidfVectorizer
+import streamlit as st
+import json
+import time
 
-# Suppress warnings
-warnings.filterwarnings("ignore")
-logging.basicConfig(level=logging.ERROR)
+import config
+from rag_pipeline import RAGPipeline
+from orchestrator import MainOrchestrator, WorkflowMode
+from utils import format_citations
 
-# ==============================
-# CONFIG
-# ==============================
-
-DATA_DIR = Path(r"D:\Download1\kerala_ayurveda_content_pack_v1")
-CSV_FILENAME = "products_catalog.csv"
-
-GROQ_API_KEY = "enter your groq api key"
-GROQ_MODEL = "llama-3.3-70b-versatile"
-
-MAX_TOKENS_CHUNK = 400
-CHUNK_OVERLAP = 50
-MAX_HISTORY_TURNS = 4
-
-
-# ==============================
-# LIGHTWEIGHT EMBEDDING (TF-IDF Based)
-# ==============================
-
-
-class TfidfEmbedding:
-    """Lightweight TF-IDF based embeddings - no PyTorch needed!"""
-
-    def __init__(self):
-        self.vectorizer = TfidfVectorizer(max_features=384, stop_words="english")
-        self.is_fitted = False
-        print("📊 Using TF-IDF embeddings (lightweight, no GPU needed)")
-
-    def fit(self, texts: List[str]):
-        """Fit the vectorizer on the corpus."""
-        self.vectorizer.fit(texts)
-        self.is_fitted = True
-
-    def encode(self, texts: List[str]) -> List[List[float]]:
-        """Encode texts to embeddings."""
-        if not self.is_fitted:
-            raise RuntimeError("Must fit vectorizer first!")
-
-        vectors = self.vectorizer.transform(texts).toarray()
-        return vectors.tolist()
-
-
-# ==============================
-# GLOBALS
-# ==============================
-
-embed_model: Optional[TfidfEmbedding] = None
-chroma_client = chromadb.Client()
-collection = chroma_client.get_or_create_collection(
-    name="kerala_ayurveda_corpus",
-    metadata={"hnsw:space": "cosine"},
+# Page configuration MUST be first
+st.set_page_config(
+    page_title=f"{config.PRODUCT_NAME} Content Agent",
+    page_icon="🌿",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-corpus_texts: List[str] = []
-corpus_metadatas: List[Dict[str, Any]] = []
-bm25: Optional[BM25Okapi] = None
+# Initialize ALL session state at the top
+if "pipeline" not in st.session_state:
+    st.session_state.pipeline = None
+if "orchestrator" not in st.session_state:
+    st.session_state.orchestrator = None
+if "result" not in st.session_state:
+    st.session_state.result = None
+if "execution_trace" not in st.session_state:
+    st.session_state.execution_trace = []
+if "corpus_loaded" not in st.session_state:
+    st.session_state.corpus_loaded = False
 
-groq_client = Groq(api_key=GROQ_API_KEY)
-conversation_history: List[Dict[str, str]] = []
-
-
-# ==============================
-# UTILS
-# ==============================
-
-
-def normalize_text(text: str) -> str:
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def simple_tokenize(text: str) -> List[str]:
-    return re.findall(r"\w+|\S", text.lower())
-
-
-def guess_corpus_type(name: str) -> str:
-    name = name.lower()
-    if name.startswith("product_"):
-        return "product"
-    if name.startswith("faq_"):
-        return "faq"
-    if "tone" in name or "style" in name:
-        return "style_guide"
-    return "article"
-
-
-def make_doc_id(name: str) -> str:
-    stem = Path(name).stem
-    if stem.startswith("product_"):
-        stem = stem[len("product_") :]
-    return stem.replace("_internal", "") + "_dossier"
+# Custom CSS
+st.markdown(
+    """
+<style>
+.step-box {
+    padding: 15px;
+    border-radius: 8px;
+    margin: 10px 0;
+    border-left: 4px solid;
+}
+.step-idle { border-color: #gray; background: #f0f0f0; }
+.step-active { border-color: #1E88E5; background: #E3F2FD; }
+.step-complete { border-color: #43A047; background: #E8F5E9; }
+.step-error { border-color: #E53935; background: #FFEBEE; }
+.info-box {
+    padding: 12px;
+    border-radius: 6px;
+    background: #E8F4F8;
+    border-left: 4px solid #2196F3;
+    margin: 10px 0;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 
-# ==============================
-# CHUNKING
-# ==============================
+# Helper function to check if pipeline is ready
+def is_pipeline_ready():
+    return (
+        st.session_state.pipeline is not None
+        and st.session_state.orchestrator is not None
+    )
 
 
-def chunk_markdown(
-    text: str,
-    doc_id: str,
-    corpus_type: str,
-    max_tokens: int = MAX_TOKENS_CHUNK,
-    overlap: int = CHUNK_OVERLAP,
-) -> List[Dict[str, Any]]:
-    lines = text.splitlines()
-    sections = []
-    current_title = "intro"
-    current_buf: List[str] = []
+# Header
+st.title(f"🌿 {config.PRODUCT_NAME} Content Generation System")
+st.markdown("*Autonomous Agentic RAG Pipeline with Persistent Corpus*")
 
-    for line in lines:
-        if re.match(r"^#{1,6}\s+", line):
-            if current_buf:
-                sections.append((current_title, "\n".join(current_buf)))
-                current_buf = []
-            current_title = re.sub(r"^#{1,6}\s+", "", line).strip()
-        else:
-            current_buf.append(line)
+# Sidebar - System Configuration
+with st.sidebar:
+    st.header("⚙️ System Configuration")
 
-    if current_buf:
-        sections.append((current_title, "\n".join(current_buf)))
+    # API Key Status
+    api_status = (
+        "🟢 Configured"
+        if config.GROQ_API_KEY != "your_groq_api_key_here"
+        else "🔴 Not Configured"
+    )
+    st.info(f"API Key: {api_status}")
 
-    chunks: List[Dict[str, Any]] = []
+    if api_status == "🔴 Not Configured":
+        st.error("Please set GROQ_API_KEY in config.py")
+        st.stop()
 
-    for idx, (title, body) in enumerate(sections, 1):
-        tokens = simple_tokenize(body)
+    # Check for existing corpus
+    corpus_exists = (
+        config.CHROMA_DIR.exists() and len(list(config.CHROMA_DIR.iterdir())) > 0
+    )
 
-        if len(tokens) <= max_tokens:
-            if body.strip():
-                chunks.append(
-                    {
-                        "section_id": f"{idx:02d}_{title[:40].replace(' ', '_').lower()}",
-                        "title": title,
-                        "content": body,
-                        "corpus_type": corpus_type,
-                        "doc_id": doc_id,
-                    }
+    if corpus_exists:
+        st.success("📦 Persistent Corpus Detected")
+
+        # Load existing corpus
+        if st.button(
+            "🔄 Load Existing Corpus", type="primary", use_container_width=True
+        ):
+            with st.spinner("Loading corpus from persistent storage..."):
+                try:
+                    st.session_state.pipeline = RAGPipeline()
+                    st.session_state.orchestrator = MainOrchestrator(
+                        st.session_state.pipeline
+                    )
+                    st.session_state.corpus_loaded = True
+                    st.success("✅ Corpus loaded successfully!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error loading corpus: {e}")
+                    st.session_state.pipeline = None
+                    st.session_state.orchestrator = None
+
+    # PDF Upload Section
+    st.subheader("📄 Knowledge Base Management")
+
+    uploaded_files = st.file_uploader(
+        "Upload Additional PDFs" if corpus_exists else "Upload Ayurvedic PDFs",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload reference PDFs (Charaka Samhita, product info, etc.)",
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Process new PDFs
+        if st.button(
+            "➕ Add PDFs" if corpus_exists else "🚀 Initialize",
+            type="secondary" if corpus_exists else "primary",
+            use_container_width=True,
+        ):
+            if not uploaded_files:
+                st.error("Please upload at least one PDF")
+            else:
+                with st.spinner("Processing PDFs..."):
+                    try:
+                        # Save uploaded files
+                        pdf_paths = []
+                        for uploaded_file in uploaded_files:
+                            file_path = config.PDF_DIR / uploaded_file.name
+                            file_path.write_bytes(uploaded_file.read())
+                            pdf_paths.append(str(file_path))
+
+                        # Initialize or update pipeline
+                        if st.session_state.pipeline is None:
+                            st.session_state.pipeline = RAGPipeline(pdf_paths=pdf_paths)
+                        else:
+                            # Add to existing pipeline
+                            st.session_state.pipeline = RAGPipeline(
+                                pdf_paths=pdf_paths, force_reingest=False
+                            )
+
+                        st.session_state.orchestrator = MainOrchestrator(
+                            st.session_state.pipeline
+                        )
+                        st.session_state.corpus_loaded = True
+                        st.success("✅ PDFs processed successfully!")
+                        time.sleep(1)
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    with col2:
+        # Reset corpus
+        if corpus_exists:
+            if st.button("🗑️ Reset", type="secondary", use_container_width=True):
+                if st.session_state.pipeline:
+                    st.session_state.pipeline.reset_corpus()
+                    st.session_state.pipeline = None
+                    st.session_state.orchestrator = None
+                    st.session_state.corpus_loaded = False
+                    st.warning("Corpus reset. Please reinitialize.")
+                    time.sleep(1)
+                    st.rerun()
+
+    # Pipeline Status
+    st.divider()
+    if is_pipeline_ready():
+        st.success("🟢 Pipeline Active")
+
+        # Get knowledge stats
+        stats = st.session_state.pipeline.get_knowledge_stats()
+
+        st.metric("Total Chunks", stats["total_chunks"])
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Product", stats["product_chunks"])
+        with col2:
+            st.metric("PDFs", stats["pdf_chunks"])
+
+        # Show processed files
+        if stats.get("processed_files"):
+            with st.expander("📚 Processed Files"):
+                for filename in stats["processed_files"]:
+                    st.text(f"  ✓ {filename}")
+
+        # Show sections
+        if stats["by_section"]:
+            with st.expander("📑 Sections"):
+                for section, count in sorted(stats["by_section"].items()):
+                    st.text(f"  {section}: {count}")
+
+        # Persistence indicator
+        if stats.get("is_persistent"):
+            st.caption("💾 Using persistent storage")
+
+    else:
+        st.warning("🔴 Pipeline Not Initialized")
+
+    st.divider()
+    st.caption(f"{config.PRODUCT_NAME} v2.1")
+    st.caption("Persistent Multi-Agent System")
+
+# Main Content - Show different UI based on pipeline state
+if not is_pipeline_ready():
+    st.info("👈 Please initialize the RAG pipeline from the sidebar to begin")
+
+    # System Architecture
+    st.subheader("🏗️ System Architecture")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("""
+        **Persistent Corpus Features:**
+        - ✅ One-time PDF processing
+        - ✅ Instant corpus loading on restart
+        - ✅ Incremental PDF addition
+        - ✅ Deduplication by file hash
+        - ✅ Product knowledge always available
+
+        **Autonomous Multi-Agent Pipeline:**
+        1. **Main Orchestrator** - Controls workflow automatically
+        2. **Outline Agent** - Structured planning with RAG validation
+        3. **Writer Agent** - Draft generation with citations
+        4. **Fact-Checker Agent** - Validates claims against corpus
+        5. **Finalization Agent** - Polishes and prepares output
+        """)
+
+    with col2:
+        st.markdown("""
+        **Intent-Aware Q&A:**
+        - Product info as primary source
+        - PDF chunks for validation & context
+        - No repetition between sources
+        - Separate citation tracking
+
+        **Enhanced PDF Processing:**
+        - ✅ Page-level isolation
+        - ✅ OCR fallback
+        - ✅ Text normalization
+        - ✅ Language detection
+        - ✅ Persistent vector DB
+        - ✅ Fast BM25 + semantic hybrid search
+        """)
+
+else:
+    # Pipeline is ready - show tabs
+    tab1, tab2 = st.tabs(["📝 Content Generation", "❓ Question & Answer"])
+
+    # TAB 1: Content Generation
+    with tab1:
+        st.header("Autonomous Content Generation")
+        st.markdown("Single-click workflow with automatic agent orchestration")
+
+        # Input Form
+        with st.form("content_generation_form"):
+            st.subheader("Content Brief")
+
+            col1, col2 = st.columns([2, 1])
+
+            with col1:
+                brief_text = st.text_area(
+                    "Content Brief",
+                    height=150,
+                    placeholder=f"Example: Write an 800-word article about {config.PRODUCT_NAME} for skin radiance...",
+                    help="Describe what you want the article to cover",
                 )
-        else:
-            start = 0
-            while start < len(tokens):
-                end = min(start + max_tokens, len(tokens))
-                sub_tokens = tokens[start:end]
-                sub_text = " ".join(sub_tokens)
 
-                if sub_text.strip():
-                    chunks.append(
-                        {
-                            "section_id": f"{idx:02d}_{title[:40].replace(' ', '_').lower()}_{start}",
-                            "title": title,
-                            "content": sub_text,
-                            "corpus_type": corpus_type,
-                            "doc_id": doc_id,
-                        }
+            with col2:
+                audience = st.selectbox(
+                    "Target Audience",
+                    [
+                        "General consumers",
+                        "Ayurveda enthusiasts",
+                        "Working professionals",
+                        "Skincare conscious individuals",
+                    ],
+                )
+
+                word_count = st.slider("Target Word Count", 500, 1500, 800, 100)
+
+                tone = st.selectbox(
+                    "Tone",
+                    [
+                        "Warm and educational",
+                        "Professional",
+                        "Conversational",
+                        "Traditional",
+                    ],
+                )
+
+            submitted = st.form_submit_button(
+                "🚀 Run Complete Workflow", type="primary", use_container_width=True
+            )
+
+        # Execute Workflow
+        if submitted:
+            if not brief_text:
+                st.error("Please provide a content brief")
+            else:
+                # Clear previous results
+                st.session_state.result = None
+                st.session_state.execution_trace = []
+
+                user_input = {
+                    "brief": brief_text,
+                    "product": config.PRODUCT_NAME,
+                    "audience": audience,
+                    "word_count": word_count,
+                    "tone": tone,
+                }
+
+                progress_container = st.container()
+
+                with progress_container:
+                    st.subheader("🔄 Workflow Progress")
+                    status_placeholder = st.empty()
+                    progress_bar = st.progress(0)
+                    status_placeholder.info("🧠 Starting workflow...")
+
+                try:
+                    result = st.session_state.orchestrator.execute_workflow(
+                        mode=WorkflowMode.CONTENT_GENERATION.value,
+                        user_input=user_input,
                     )
 
-                if end == len(tokens):
-                    break
-                start = end - overlap
+                    # Store successful result
+                    st.session_state.result = result
+                    st.session_state.execution_trace = result.get("execution_trace", [])
 
-    return chunks
+                    progress_bar.progress(100)
+                    status_placeholder.success("✅ Workflow completed successfully!")
 
+                    # Force rerun to show results
+                    time.sleep(1)
+                    st.rerun()
 
-def csv_row_to_chunk(row: Dict[str, str], idx: int) -> Dict[str, Any]:
-    product_id = row.get("product_id") or str(idx)
-    name = row.get("name") or f"product_{product_id}"
+                except Exception as e:
+                    progress_bar.progress(100)
+                    status_placeholder.error(f"❌ Workflow failed: {str(e)}")
 
-    field_lines = [
-        f"{k.replace('_', ' ').title()}: {v.strip()}"
-        for k, v in row.items()
-        if v and v.strip()
-    ]
-    content = "\n".join(field_lines)
+                    # Capture partial results if available
+                    if (
+                        st.session_state.orchestrator
+                        and st.session_state.orchestrator.execution_trace
+                    ):
+                        st.session_state.execution_trace = (
+                            st.session_state.orchestrator.execution_trace
+                        )
 
-    return {
-        "section_id": f"csv_{idx}",
-        "title": name,
-        "content": content,
-        "corpus_type": "product",
-        "doc_id": f"product_catalog_{product_id}",
-        "product_id": product_id,
-        "name": name,
-    }
+                    # Show error details in expander
+                    with st.expander("Error Details", expanded=True):
+                        st.exception(e)
 
+        # Display Results
+        if (
+            st.session_state.result
+            and st.session_state.result.get("mode") == "content_generation"
+        ):
+            st.divider()
+            st.subheader("📊 Execution Trace")
 
-# ==============================
-# INGEST CORPUS
-# ==============================
+            # Show execution steps
+            with st.expander("View Detailed Execution Log", expanded=False):
+                for entry in st.session_state.execution_trace:
+                    step_type = entry["step_type"]
+                    message = entry["message"]
 
+                    if step_type == "ERROR":
+                        st.error(f"🔴 {message}")
+                    elif step_type in ["COMPLETED", "FACT_CHECK_PASSED"]:
+                        st.success(f"✅ {message}")
+                    elif "COMPLETE" in step_type:
+                        st.info(f"✓ {message}")
+                    else:
+                        st.text(f"• {message}")
 
-def ingest_corpus():
-    global corpus_texts, corpus_metadatas, bm25, embed_model
+            # Show retry count
+            total_retries = st.session_state.result.get("total_retries", 0)
+            if total_retries > 0:
+                st.warning(
+                    f"⚠️ Required {total_retries} revision(s) to pass fact-checking"
+                )
 
-    # Initialize embedding model
-    if embed_model is None:
-        embed_model = TfidfEmbedding()
+            st.divider()
 
-    corpus_texts = []
-    corpus_metadatas = []
-    row_id_counter = 0
+            # Display Final Output
+            result = st.session_state.result
+            final_output = result["final_output"]
 
-    print(f"📁 Scanning directory: {DATA_DIR}")
+            st.subheader("📄 Final Article")
 
-    # ---- Markdown files ----
-    md_files = list(DATA_DIR.glob("*.md"))
-    if not md_files:
-        print(f"⚠️  No .md files found in {DATA_DIR}")
-    else:
-        print(f"✓ Found {len(md_files)} markdown files")
+            # Metrics
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Status", final_output["status"])
+            col2.metric("Paragraphs", len(result["draft"]["paragraphs"]))
+            col3.metric("Citations", len(final_output["citations"]))
+            col4.metric("Revisions", total_retries)
 
-    for md_path in md_files:
-        try:
-            raw = md_path.read_text(encoding="utf-8")
-            normalized = normalize_text(raw)
-            corpus_type = guess_corpus_type(md_path.name)
-            doc_id = make_doc_id(md_path.name)
+            # Article Text
+            st.markdown("---")
+            st.markdown(final_output["text"])
+            st.markdown("---")
 
-            md_chunks = chunk_markdown(normalized, doc_id, corpus_type)
+            # Citations
+            st.subheader("📚 Citations")
+            if final_output["citations"]:
+                citation_text = format_citations(final_output["citations"])
+                st.code(citation_text, language="text")
+            else:
+                st.info("No citations (narrative content only)")
 
-            for ch in md_chunks:
-                corpus_texts.append(ch["content"])
-                ch["row_id"] = row_id_counter
-                corpus_metadatas.append(ch)
-                row_id_counter += 1
+            # Editor Notes
+            if final_output.get("notes_for_editor"):
+                st.subheader("📝 Notes for Editor")
+                for note in final_output["notes_for_editor"]:
+                    st.info(note)
 
-            print(f"  ✓ {md_path.name}: {len(md_chunks)} chunks")
-        except Exception as e:
-            print(f"  ✗ Error with {md_path.name}: {e}")
+            # Export Options
+            st.subheader("💾 Export")
 
-    # ---- CSV file ----
-    csv_path = DATA_DIR / CSV_FILENAME
-    if csv_path.exists():
-        try:
-            with open(csv_path, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                csv_rows = list(reader)
+            col1, col2, col3 = st.columns(3)
 
-                for idx, row in enumerate(csv_rows):
-                    chunk = csv_row_to_chunk(row, idx)
-                    chunk["row_id"] = row_id_counter
-                    corpus_texts.append(chunk["content"])
-                    corpus_metadatas.append(chunk)
-                    row_id_counter += 1
+            with col1:
+                # Download Markdown
+                md_content = f"""# {config.PRODUCT_NAME} Article
 
-            print(f"  ✓ {CSV_FILENAME}: {len(csv_rows)} products")
-        except Exception as e:
-            print(f"  ✗ Error with CSV: {e}")
-    else:
-        print(f"⚠️  {CSV_FILENAME} not found")
+{final_output["text"]}
 
-    if not corpus_texts:
-        raise RuntimeError(f"❌ No data found! Check: {DATA_DIR}")
+## Citations
 
-    print(f"\n📚 Total chunks: {len(corpus_texts)}")
+"""
+                for cit in final_output["citations"]:
+                    md_content += (
+                        f"[{cit['label']}] {cit['doc_id']} (Page {cit['page']})\n"
+                    )
 
-    # ---- BM25 index ----
-    print("🔨 Building BM25 index...")
-    tokenized_corpus = []
-    for t in corpus_texts:
-        toks = simple_tokenize(t)
-        tokenized_corpus.append(toks if toks else ["_empty_"])
-    bm25 = BM25Okapi(tokenized_corpus)
-    print("  ✓ BM25 ready")
+                st.download_button(
+                    "📥 Download Markdown",
+                    md_content,
+                    f"{config.PRODUCT_NAME.lower().replace(' ', '_')}_article.md",
+                    "text/markdown",
+                    use_container_width=True,
+                )
 
-    # ---- Fit TF-IDF and create embeddings ----
-    print("🔨 Building TF-IDF embeddings...")
-    embed_model.fit(corpus_texts)
-    embeddings = embed_model.encode(corpus_texts)
-    print(f"  ✓ Created {len(embeddings)} embeddings")
+            with col2:
+                # Download JSON
+                st.download_button(
+                    "📥 Download JSON",
+                    json.dumps(result, indent=2, default=str),
+                    f"{config.PRODUCT_NAME.lower().replace(' ', '_')}_article.json",
+                    "application/json",
+                    use_container_width=True,
+                )
 
-    # ---- Clear existing ChromaDB collection ----
-    try:
-        existing = collection.get()
-        if existing.get("ids"):
-            collection.delete(ids=existing["ids"])
-            print(f"  ✓ Cleared {len(existing['ids'])} old entries")
-    except:
-        pass
+            with col3:
+                if st.button("🔄 Start New Article", use_container_width=True):
+                    st.session_state.result = None
+                    st.session_state.execution_trace = []
+                    st.rerun()
 
-    # ---- Add to ChromaDB ----
-    print("📥 Indexing into ChromaDB...")
-    try:
-        collection.add(
-            documents=corpus_texts,
-            metadatas=corpus_metadatas,
-            embeddings=embeddings,
-            ids=[str(m["row_id"]) for m in corpus_metadatas],
+    # TAB 2: Question & Answer
+    with tab2:
+        st.header("Question & Answer")
+        st.markdown("Intent-aware retrieval with corpus type separation")
+
+        # Show pipeline status at top of tab
+        stats = st.session_state.pipeline.get_knowledge_stats()
+        st.info(
+            f"✅ Pipeline Ready | {stats['total_chunks']} chunks ({stats['product_chunks']} product + {stats['pdf_chunks']} PDFs)"
         )
-        print("  ✓ Indexed successfully")
-    except Exception as e:
-        print(f"❌ ChromaDB error: {e}")
-        raise
 
-    print("\n✅ System ready!\n")
-
-
-# ==============================
-# RETRIEVAL (HYBRID)
-# ==============================
-
-
-def hybrid_retrieve(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-    if bm25 is None:
-        raise RuntimeError("BM25 not initialized!")
-    if embed_model is None:
-        raise RuntimeError("Embedding model not initialized!")
-
-    # BM25 scoring
-    tokens = simple_tokenize(query)
-    scores = bm25.get_scores(tokens)
-
-    indexed_scores = list(enumerate(scores))
-    indexed_scores.sort(key=lambda x: x[1], reverse=True)
-
-    candidate_indices = [idx for idx, score in indexed_scores if score > 0][:50]
-
-    try:
-        query_embedding = embed_model.encode([query])
-
-        if not candidate_indices:
-            # Pure semantic search
-            results = collection.query(
-                query_embeddings=query_embedding,
-                n_results=min(top_k, len(corpus_texts)),
-            )
-        else:
-            # Hybrid search
-            candidate_ids = [corpus_metadatas[i]["row_id"] for i in candidate_indices]
-
-            results = collection.query(
-                query_embeddings=query_embedding,
-                n_results=min(top_k, len(candidate_ids)),
-                where={"row_id": {"$in": candidate_ids}},
-            )
-    except Exception as e:
-        print(f"⚠️  Retrieval warning: {e}")
-        # Fallback to pure semantic
-        try:
-            query_embedding = embed_model.encode([query])
-            results = collection.query(
-                query_embeddings=query_embedding,
-                n_results=min(top_k, len(corpus_texts)),
-            )
-        except Exception as e2:
-            print(f"❌ Search failed: {e2}")
-            return []
-
-    chunks: List[Dict[str, Any]] = []
-    if results.get("documents") and results["documents"]:
-        for text, meta in zip(results["documents"][0], results["metadatas"][0]):
-            chunks.append(
-                {
-                    "content": text,
-                    "doc_id": meta.get("doc_id", "unknown"),
-                    "section_id": meta.get("section_id", "unknown"),
-                    "corpus_type": meta.get("corpus_type", ""),
-                    "title": meta.get("title", ""),
-                }
-            )
-
-    return chunks
-
-
-# ==============================
-# PROMPTING + LLM
-# ==============================
-
-
-def build_prompt(query: str, chunks: List[Dict[str, Any]]) -> str:
-    numbered_blocks = []
-    for i, c in enumerate(chunks, 1):
-        label = f"[{i}] {c['doc_id']} / {c['section_id']}"
-        if c.get("title"):
-            label += f" ({c['title']})"
-        numbered_blocks.append(f"{label}\n{c['content']}\n")
-
-    context = "\n\n".join(numbered_blocks)
-
-    history_text = ""
-    for turn in conversation_history[-MAX_HISTORY_TURNS:]:
-        role = turn["role"].capitalize()
-        history_text += f"{role}: {turn['content']}\n"
-
-    system = """You are an internal Kerala Ayurveda assistant.
-
-Rules:
-- Use ONLY the provided context for factual statements.
-- If something is not supported by the context, reply: "I don't know based on the internal corpus."
-- Warm, grounded, reassuring tone.
-- Do NOT make medical or cure claims.
-- Encourage consulting a qualified physician for medical questions.
-- When using a chunk, cite it with [1], [2], etc., matching the numbered context."""
-
-    prompt = f"""SYSTEM:
-{system}
-
-CONVERSATION HISTORY:
-{history_text}
-
-CONTEXT:
-{context}
-
-USER QUESTION:
-{query}
-
-ASSISTANT:
-Please answer using the context and include citations like [1], [2] where appropriate."""
-
-    return prompt
-
-
-def call_llama(prompt: str) -> str:
-    try:
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=1024,
+        # Retrieval mode selector
+        st.markdown('<div class="info-box">', unsafe_allow_html=True)
+        st.markdown("**Retrieval Strategy:**")
+        use_product_direct = st.checkbox(
+            "Use product info as primary answer source",
+            value=True,
+            help="When enabled: Product chunks provide the main answer, PDF chunks add context. When disabled: Blend both equally.",
         )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"⚠️  Groq API error: {str(e)}"
+        st.markdown("</div>", unsafe_allow_html=True)
 
+        query = st.text_input(
+            "Your Question",
+            placeholder=f"Example: What are the key ingredients in {config.PRODUCT_NAME}?",
+        )
 
-def extract_citations(
-    answer: str, chunks: List[Dict[str, Any]]
-) -> List[Dict[str, str]]:
-    nums = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
-    out: List[Dict[str, str]] = []
-    for n in sorted(nums):
-        if 1 <= n <= len(chunks):
-            c = chunks[n - 1]
-            out.append({"doc_id": c["doc_id"], "section_id": c["section_id"]})
-    return out
+        if st.button("🔍 Search", type="primary"):
+            if not query:
+                st.error("Please enter a question")
+            else:
+                with st.spinner("Searching knowledge base..."):
+                    try:
+                        result = st.session_state.pipeline.answer_query(
+                            query, use_product_direct=use_product_direct
+                        )
 
+                        # Display answer
+                        st.subheader("Answer")
+                        st.markdown(result["answer"])
 
-# ==============================
-# MAIN ANSWER FUNCTION
-# ==============================
+                        # Show retrieval mode
+                        mode_icon = (
+                            "🎯"
+                            if result["retrieval_mode"] == "product_direct"
+                            else "⚖️"
+                        )
+                        st.caption(
+                            f"{mode_icon} Retrieval mode: {result['retrieval_mode']}"
+                        )
 
+                        # Citations
+                        if result["citations"]:
+                            st.subheader("Sources")
 
-def answer_user_query(query: str) -> Dict[str, Any]:
-    conversation_history.append({"role": "user", "content": query})
+                            # Separate citations by type
+                            product_cites = [
+                                c
+                                for c in result["citations"]
+                                if c.get("type") == "product"
+                            ]
+                            trad_cites = [
+                                c
+                                for c in result["citations"]
+                                if c.get("type") == "traditional"
+                            ]
 
-    chunks = hybrid_retrieve(query, top_k=5)
+                            if product_cites:
+                                st.markdown("**Product Information:**")
+                                for cit in product_cites:
+                                    section = (
+                                        f" - {cit['section']}"
+                                        if cit.get("section")
+                                        else ""
+                                    )
+                                    st.text(
+                                        f"[{cit['label']}] {cit['doc_id']} (Page {cit['page']}){section}"
+                                    )
 
-    if not chunks:
-        answer = "I don't know based on the internal corpus."
-        conversation_history.append({"role": "assistant", "content": answer})
-        return {"answer": answer, "citations": []}
+                            if trad_cites:
+                                st.markdown("**Traditional Knowledge:**")
+                                for cit in trad_cites:
+                                    st.text(
+                                        f"[{cit['label']}] {cit['doc_id']} (Page {cit['page']})"
+                                    )
 
-    prompt = build_prompt(query, chunks)
-    answer = call_llama(prompt)
-    citations = extract_citations(answer, chunks)
+                        # Retrieved chunks (organized by type)
+                        with st.expander("View Retrieved Context"):
+                            if result.get("product_chunks"):
+                                st.markdown("**📦 Product Chunks (Primary):**")
+                                for i, chunk in enumerate(result["product_chunks"], 1):
+                                    st.markdown(
+                                        f"**[P{i}] {chunk['doc_id']} - {chunk.get('section', 'general')}** (Similarity: {chunk['similarity']:.3f})"
+                                    )
+                                    st.text(chunk["text"][:300] + "...")
+                                    st.divider()
 
-    conversation_history.append({"role": "assistant", "content": answer})
+                            if result.get("pdf_chunks"):
+                                st.markdown("**📚 Traditional Knowledge (Context):**")
+                                for i, chunk in enumerate(result["pdf_chunks"], 1):
+                                    st.markdown(
+                                        f"**[T{i}] {chunk['doc_id']} (Page {chunk['page']})** (Similarity: {chunk['similarity']:.3f})"
+                                    )
+                                    st.text(chunk["text"][:300] + "...")
+                                    st.divider()
 
-    return {"answer": answer, "citations": citations}
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        with st.expander("Error Details"):
+                            st.exception(e)
 
-
-# ==============================
-# CLI CHAT LOOP
-# ==============================
-
-if __name__ == "__main__":
-    print("=" * 70)
-    print("    KERALA AYURVEDA INTERNAL Q&A SYSTEM")
-    print("=" * 70)
-    print()
-
-    try:
-        ingest_corpus()
-    except Exception as e:
-        print(f"\n❌ Setup failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        exit(1)
-
-    print("=" * 70)
-    print("💬 CHAT READY - Ask me anything!")
-    print("=" * 70)
-    print("Commands: 'exit' to quit | 'clear' to reset history")
-    print()
-
-    while True:
-        try:
-            user_q = input("You: ").strip()
-
-            if not user_q:
-                continue
-
-            if user_q.lower() in {"exit", "quit"}:
-                print("\n👋 Goodbye!")
-                break
-
-            if user_q.lower() == "clear":
-                conversation_history.clear()
-                print("🔄 History cleared\n")
-                continue
-
-            result = answer_user_query(user_q)
-
-            print(f"\n🤖 {result['answer']}")
-
-            if result["citations"]:
-                print(f"\n📚 Sources: {result['citations']}")
-
-            print("\n" + "-" * 70 + "\n")
-
-        except KeyboardInterrupt:
-            print("\n\n👋 Goodbye!")
-            break
-        except Exception as e:
-            print(f"\n⚠️  Error: {e}\n")
-            print("-" * 70 + "\n")
+# Footer
+st.divider()
+st.caption(
+    f"{config.PRODUCT_NAME} Agentic Content System | {config.BRAND_NAME} RAG Pipeline v2.1"
+)
+st.caption("Persistent Multi-Agent Orchestration with Intent-Aware Retrieval")
+# •	What are the key ingredients in Nalpamaradi keram
+# •	can a pregnant women use  Nalpamaradi keram
+# “What is Nalpamaradi Keram?”
+# “How do I use it on face?”
+# “What is Nalpamara in Ayurveda?”
+# “Does it cure eczema?”
