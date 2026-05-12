@@ -1,26 +1,3 @@
-Optimizing tool selection...I'll explore this project thoroughly to give you a complete interview-style explanation using the STAR method.    
-
-Read [](file:///d%3A/Download1/kerala_ayurveda_content_pack_v1/app.py#1-1), lines 1 to 80
-
-Read [](file:///d%3A/Download1/kerala_ayurveda_content_pack_v1/requirements.txt)
-
-Read [](file:///d%3A/Download1/kerala_ayurveda_content_pack_v1/rag_pipeline.py#1-1), lines 1 to 100
-
-Read [](file:///d%3A/Download1/kerala_ayurveda_content_pack_v1/README.md)
-
-Read [](file:///d%3A/Download1/kerala_ayurveda_content_pack_v1/orchestrator.py#1-1), lines 1 to 80
-
-Read [](file:///d%3A/Download1/kerala_ayurveda_content_pack_v1/config.py#1-1), lines 1 to 100
-
-Read [](file:///d%3A/Download1/kerala_ayurveda_content_pack_v1/product_knowledge.py#1-1), lines 1 to 50
-
-Read [](file:///d%3A/Download1/kerala_ayurveda_content_pack_v1/dosha_guide_vata_pitta_kapha.md#1-1), lines 1 to 40
-
-Read [](file:///d%3A/Download1/kerala_ayurveda_content_pack_v1/agents.py#1-1), lines 1 to 100
-
-# Kerala Ayurveda Content Pack - Project Explanation (STAR Method)
-
-## **SITUATION**
 
 I was tasked with developing an intelligent content generation system for **Kerala Ayurveda**, a company specializing in Ayurvedic skincare products. The primary challenge was creating accurate, engaging content about their flagship product **Nalpamaradi Keram** (an Ayurvedic skin-brightening oil) while ensuring all information was grounded in both product knowledge and traditional Ayurvedic wisdom.
 
